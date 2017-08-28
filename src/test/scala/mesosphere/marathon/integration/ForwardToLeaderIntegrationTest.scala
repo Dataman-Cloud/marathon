@@ -2,7 +2,7 @@ package mesosphere.marathon
 package integration
 
 import java.net.URL
-
+import org.apache.commons.io.IOUtils
 import mesosphere.AkkaIntegrationTest
 import mesosphere.marathon.api.{ JavaUrlConnectionRequestForwarder, LeaderProxyFilter }
 import mesosphere.marathon.integration.setup._
@@ -60,7 +60,7 @@ class ForwardToLeaderIntegrationTest extends AkkaIntegrationTest {
       val connection = SSLContextTestUtil.sslConnection(pingURL, SSLContextTestUtil.selfSignedSSLContext)
       val via = connection.getHeaderField(JavaUrlConnectionRequestForwarder.HEADER_VIA)
       val leader = connection.getHeaderField(LeaderProxyFilter.HEADER_MARATHON_LEADER)
-      val response = IO.using(connection.getInputStream)(IO.copyInputStreamToString)
+      val response = IOUtils.toString(connection.getInputStream, "UTF-8")
       response should be("pong\n")
       via should be(null)
       leader should be(s"https://localhost:$helloPort")
@@ -83,7 +83,7 @@ class ForwardToLeaderIntegrationTest extends AkkaIntegrationTest {
       val connection = SSLContextTestUtil.sslConnection(pingURL, SSLContextTestUtil.selfSignedSSLContext)
       val via = connection.getHeaderField(JavaUrlConnectionRequestForwarder.HEADER_VIA)
       val leader = connection.getHeaderField(LeaderProxyFilter.HEADER_MARATHON_LEADER)
-      val response = IO.using(connection.getInputStream)(IO.copyInputStreamToString)
+      val response = IOUtils.toString(connection.getInputStream, "UTF-8")
       response should be("pong\n")
       via should be(s"1.1 localhost:$forwardPort")
       leader should be(s"https://localhost:$helloPort")
@@ -110,7 +110,7 @@ class ForwardToLeaderIntegrationTest extends AkkaIntegrationTest {
       val connection = SSLContextTestUtil.sslConnection(pingURL, SSLContextTestUtil.caSignedSSLContext)
       val via = connection.getHeaderField(JavaUrlConnectionRequestForwarder.HEADER_VIA)
       val leader = connection.getHeaderField(LeaderProxyFilter.HEADER_MARATHON_LEADER)
-      val response = IO.using(connection.getInputStream)(IO.copyInputStreamToString)
+      val response = IOUtils.toString(connection.getInputStream, "UTF-8")
       response should be("pong\n")
       via should be(s"1.1 localhost:$forwardPort")
       leader should be(s"https://localhost:$helloPort")
