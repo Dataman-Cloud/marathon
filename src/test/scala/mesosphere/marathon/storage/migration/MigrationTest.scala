@@ -3,6 +3,7 @@ package storage.migration
 
 import akka.Done
 import akka.stream.scaladsl.Source
+import com.typesafe.scalalogging.Logger
 import mesosphere.AkkaUnitTest
 import mesosphere.marathon.Protos.StorageVersion
 import mesosphere.marathon.core.storage.backup.PersistentStoreBackup
@@ -14,10 +15,22 @@ import mesosphere.marathon.storage.migration.StorageVersions._
 import mesosphere.marathon.storage.repository._
 import mesosphere.marathon.test.Mockito
 import org.scalatest.GivenWhenThen
+import Migration.MigrationAction
+import akka.actor.ActorSystem
+import akka.stream.{ ActorMaterializer, Materializer }
+import com.typesafe.config.ConfigValueFactory
+import org.slf4j.{ Logger => SLF4JLogger }
 
+import concurrent.duration._
 import scala.concurrent.Future
 
 class MigrationTest extends AkkaUnitTest with Mockito with GivenWhenThen {
+
+  val newConfig = akkaConfig.withValue("migration.status-logging-interval", ConfigValueFactory.fromAnyRef("200 millis"))
+
+  val newSystem: ActorSystem = ActorSystem(suiteName, newConfig)
+
+  val m: Materializer = ActorMaterializer()(newSystem)
 
   private[this] def migration(
     persistenceStore: PersistenceStore[_, _, _] = new InMemoryPersistenceStore(),
@@ -31,14 +44,25 @@ class MigrationTest extends AkkaUnitTest with Mockito with GivenWhenThen {
     configurationRepository: RuntimeConfigurationRepository = mock[RuntimeConfigurationRepository],
     backup: PersistentStoreBackup = mock[PersistentStoreBackup],
     serviceDefinitionRepository: ServiceDefinitionRepository = mock[ServiceDefinitionRepository],
-    config: StorageConfig = InMem(1, Set.empty, None, None)): Migration = {
+    config: StorageConfig = InMem(1, Set.empty, None, None),
+    newLogger: Logger = Logger(classOf[Migration]),
+    fakeMigrations: List[MigrationAction] = List.empty): Migration = {
 
     // assume no runtime config is stored in repository
     configurationRepository.get() returns Future.successful(None)
     configurationRepository.store(any) returns Future.successful(Done)
     new Migration(Set.empty, None, "bridge-name", persistenceStore, appRepository, podRepository, groupRepository, deploymentRepository,
       instanceRepository, taskFailureRepository, frameworkIdRepository,
-      serviceDefinitionRepository, configurationRepository, backup, config)
+      serviceDefinitionRepository, configurationRepository, backup, config)(mat = m) {
+
+      override val logger = newLogger
+
+      override def migrations: List[(StorageVersion, () => Future[Any])] = if (fakeMigrations.nonEmpty) {
+        fakeMigrations
+      } else {
+        super.migrations
+      }
+    }
   }
 
   val currentVersion: StorageVersion = StorageVersions.current
@@ -139,6 +163,38 @@ class MigrationTest extends AkkaUnitTest with Mockito with GivenWhenThen {
       val result = migrate.migrate()
       result should be ('nonEmpty)
       result should contain theSameElementsInOrderAs migrate.migrations.map(_._1)
+    }
+
+    "log periodic messages if migration takes more time than usual" in {
+      val mockedStore = mock[PersistenceStore[_, _, _]]
+      val mockedLogger = mock[SLF4JLogger]
+
+      mockedLogger.isInfoEnabled returns true
+      val migrate = migration(
+        persistenceStore = mockedStore,
+        newLogger = Logger(mockedLogger),
+        fakeMigrations = List(
+          StorageVersions(1, 4, 2, StorageVersion.StorageFormat.PERSISTENCE_STORE) -> { () =>
+            akka.pattern.after(1100.millis, system.scheduler) { //1100 because we want to catch 5 ticks of notifications
+              Future.successful(Done)
+            }
+          }
+        )
+      )
+
+      mockedStore.storageVersion() returns Future.successful(
+        Some(StorageVersions(1, 4, 0, StorageVersion.StorageFormat.PERSISTENCE_STORE))
+      )
+
+      mockedStore.setStorageVersion(any) returns Future.successful(Done)
+
+      migrate.migrate()
+
+      verify(mockedLogger, atLeast(7)).info(any) //2 logging messages for init and shutdown, and 5 for waiting
+
+      verify(mockedStore).storageVersion()
+      verify(mockedStore).setStorageVersion(StorageVersions.current)
+      noMoreInteractions(mockedStore)
     }
   }
 }

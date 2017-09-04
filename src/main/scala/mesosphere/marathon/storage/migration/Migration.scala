@@ -2,9 +2,10 @@ package mesosphere.marathon
 package storage.migration
 
 import java.net.URI
+import java.util.concurrent.TimeUnit
 
 import akka.Done
-import akka.stream.Materializer
+import akka.stream.{ ActorMaterializer, Materializer }
 import com.typesafe.scalalogging.StrictLogging
 import mesosphere.marathon.Protos.StorageVersion
 import mesosphere.marathon.core.async.ExecutionContexts.global
@@ -19,6 +20,8 @@ import scala.concurrent.{ Await, Future }
 import scala.util.control.NonFatal
 import scala.util.matching.Regex
 import mesosphere.marathon.raml.RuntimeConfiguration
+
+import scala.util.Try
 
 /**
   * @param persistenceStore Optional "new" PersistenceStore for new migrations, the repositories
@@ -44,8 +47,7 @@ class Migration(
 )(implicit mat: Materializer) extends StrictLogging {
 
   import StorageVersions._
-
-  type MigrationAction = (StorageVersion, () => Future[Any])
+  import Migration.MigrationAction
 
   private[migration] val minSupportedStorageVersion = StorageVersions(1, 4, 0, StorageVersion.StorageFormat.PERSISTENCE_STORE)
 
@@ -73,9 +75,36 @@ class Migration(
           s"Migration for storage: ${from.str} to current: ${current.str}: " +
             s"apply change for version: ${migrateVersion.str} "
         )
+
+        val statusLoggingInterval = Try {
+          mat.asInstanceOf[ActorMaterializer].system.settings.config
+            .getDuration("migration.status-logging-interval", TimeUnit.MILLISECONDS).millis
+        } getOrElse {
+          logger.info("Can't get status logging interval from config, default value will be used")
+          10.seconds
+        }
+
+        val migrationInProgressNotification = mat.schedulePeriodically(
+          statusLoggingInterval,
+          statusLoggingInterval,
+          new Runnable {
+            override def run(): Unit =
+              logger.info(
+                s"Migration for storage: ${from.str} to current: ${current.str}: " +
+                  s"application of the change for version ${migrateVersion.str} is still in progress"
+              )
+          })
+
         change.apply().recover {
-          case NonFatal(e) => throw new MigrationFailedException(s"while migrating storage to $migrateVersion", e)
-        }.map(_ => res :+ migrateVersion)
+          case NonFatal(e) =>
+            migrationInProgressNotification.cancel()
+            throw new MigrationFailedException(s"while migrating storage to $migrateVersion", e)
+        }.map { _ =>
+          res :+ migrateVersion
+        }.andThen {
+          case _ =>
+            migrationInProgressNotification.cancel()
+        }
       }
     }
   }
@@ -147,6 +176,9 @@ class Migration(
 
 object Migration {
   val StorageVersionName = "internal:storage:version"
+
+  type MigrationAction = (StorageVersion, () => Future[Any])
+
 }
 
 object StorageVersions {
